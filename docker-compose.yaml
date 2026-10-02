@@ -115,6 +115,8 @@ services:
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
+    ports:
+      - "127.0.0.1:8888:8080"
     environment:
       - SEARXNG_VALKEY_URL=redis://redis:6379/0
     volumes:
