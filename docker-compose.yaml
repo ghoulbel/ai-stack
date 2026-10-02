@@ -1,0 +1,141 @@
+services:
+  # ──────────────────────────────────────────────
+  # Ollama - LLM engine (NVIDIA)
+  # ──────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    gpus: all
+    shm_size: 64g
+    environment:
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_CONTEXT_LENGTH=32768
+      # - OLLAMA_NUM_GPU=31
+    volumes:
+      - ./data/ollama:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # Open-WebUI - Frontend
+  # ──────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ENABLE_IMAGE_GENERATION=true
+      - IMAGE_GENERATION_ENGINE=comfyui
+      - COMFYUI_BASE_URL=http://comfyui:8188
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://vectordb:6333
+      - WEB_SEARCH_CONCURRENT_REQUESTS=4
+      - WEB_SEARCH_TRUST_ENV=true
+      - ENABLE_PERSISTENT_CONFIG=true
+    volumes:
+      - ./data/webui:/app/backend/data
+      - ./data/webui/config/images:/app/backend/open_webui/utils/images
+    depends_on:
+      - ollama
+      - comfyui
+      - vectordb
+      - searxng
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # ComfyUI - Image Generation (NVIDIA)
+  # ──────────────────────────────────────────────
+  comfyui:
+    image: pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
+    container_name: comfyui
+    gpus: all
+    ports:
+      - "8188:8188"
+    shm_size: 32g
+    volumes:
+      - ./data/comfyui:/workspace
+    command: >
+      bash -c "
+      apt-get update &&
+      apt-get install -y --no-install-recommends libxcb1 libgl1 libglib2.0-0 &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore torchvision==0.27.1 torchaudio==2.11.0 &&
+      grep -vE '^(torch|torchvision|torchaudio|xformers)([<>=!~]|$)' /workspace/requirements.txt > /tmp/requirements-comfyui.txt &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /tmp/requirements-comfyui.txt &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_PuLID_Flux_ll/requirements.txt &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_Patches_ll/requirements.txt &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI-GGUF/requirements.txt &&
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore --no-deps facenet-pytorch==2.6.0 &&
+      python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --force-fp16 --use-pytorch-cross-attention --preview-method none --lowvram
+      "
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # Qdrant - Vector DB
+  # ──────────────────────────────────────────────
+  vectordb:
+    image: qdrant/qdrant:latest
+    container_name: vectordb
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # MCPO - Fast Search Bridge
+  # ──────────────────────────────────────────────
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: mcpo
+    volumes:
+      - ./data/mcpo:/app/config
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+    command: mcpo --config /app/config/config.json
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # SearXNG - Meta Search
+  # ──────────────────────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    environment:
+      - SEARXNG_VALKEY_URL=redis://redis:6379/0
+    volumes:
+      - ./data/searxng/config:/etc/searxng
+    depends_on:
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+  # ──────────────────────────────────────────────
+  # Valkey - Redis-compatible cache
+  # ──────────────────────────────────────────────
+  redis:
+    image: valkey/valkey:8-alpine
+    container_name: redis
+    restart: unless-stopped
+    networks:
+      - ai-net
+
+networks:
+  ai-net:
+    driver: bridge

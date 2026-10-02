@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data: model weights, vector DB, image outputs (150+ GB).
+# Only the mcpo MCP config is tracked.
+data/*
+!data/mcpo/
+data/mcpo/*
+!data/mcpo/config.json
+
+# Nested VCS clone of ComfyUI (its own repo, 60+ GB)
+data/comfyui/
+
+# Python venvs
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Superseded compose variants / backups
+*.back
+*.back2
+*.bak
+*.old
+*.new
+*.audio
+*.before-comfy-pin
+*.minix-recovered
+*.minix-backup
+*.copy
+docker-compose.yaml.new
