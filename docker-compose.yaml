@@ -5,8 +5,23 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    # Loopback + tailnet only, never 0.0.0.0. Ollama has no authentication of
+    # any kind, so anything that can open this port can run any model on the
+    # GPU. Binding it to the LAN meant every device on the Wi-Fi — guests,
+    # a compromised phone, anything — could do that for free.
+    #
+    # Both entries are needed:
+    #   127.0.0.1        opencode's embedding provider talks to it here, and so
+    #                    does OpenWebUI inside the container network.
+    #   TAILSCALE_IP     lets you run opencode / Ollama from another tailnet
+    #                    device (laptop, phone) without exposing the API to the
+    #                    LAN. This is machine-to-machine access (rule 6): it
+    #                    deliberately does not go through Authentik.
+    # ${TAILSCALE_IP:?} rather than ${TAILSCALE_IP:-} so that a blank value
+    # fails loudly instead of silently becoming a 0.0.0.0 binding.
     ports:
-      - "11434:11434"
+      - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
+      - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${OLLAMA_PORT:-11434}:11434"
     gpus: all
     shm_size: 64g
     environment:
@@ -14,7 +29,10 @@ services:
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=2
       - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_ORIGINS=*
+      # Was "*", which lets any web page you happen to visit drive your GPU.
+      # Every real consumer (OpenWebUI, opencode) is server-side and never
+      # sends an Origin, so this only restricts the browser-accessible UI.
+      - OLLAMA_ORIGINS=http://localhost:11434,http://127.0.0.1:11434,http://${TAILSCALE_IP:?}:11434
       - OLLAMA_CONTEXT_LENGTH=32768
       # - OLLAMA_NUM_GPU=31
     volumes:
@@ -29,8 +47,18 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
-    # No `ports:` on purpose. This host is reachable only through Traefik, which
-    # is the single front door for every human-facing service.
+    # Human access: Traefik only, which is the single front door. This host is
+    # never published on 0.0.0.0.
+    #
+    # Machine-to-machine: loopback only, and it is needed. opencode's LLM
+    # provider is configured with baseURL http://127.0.0.1:3000/api/v1, so
+    # without this entry opencode cannot reach the model at all (verified: the
+    # port returned nothing once it was removed). Loopback is not "exposed" —
+    # nothing on the LAN can open it — and it is exactly the shape of the
+    # Authentik recovery listener. This is Type B traffic (rule 6): it
+    # authenticates with an API key, never with interactive Authentik.
+    ports:
+      - "127.0.0.1:${WEBUI_PORT:-3000}:8080"
     labels:
       traefik.enable: "true"
       traefik.docker.network: "proxy"
@@ -124,8 +152,14 @@ services:
     image: pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
     container_name: comfyui
     gpus: all
+    # Loopback + tailnet, never 0.0.0.0. The ComfyUI web UI lets anyone who can
+    # reach it queue jobs on the GPU and read the workflow library. OpenWebUI
+    # reaches it over ai-net, so it does not need a published port at all; the
+    # two entries below are for driving it from this machine or another
+    # tailnet device.
     ports:
-      - "8188:8188"
+      - "127.0.0.1:${COMFYUI_PORT:-8188}:8188"
+      - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${COMFYUI_PORT:-8188}:8188"
     shm_size: 32g
     volumes:
       - ./data/comfyui:/workspace
@@ -179,8 +213,20 @@ services:
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
+    # Loopback + tailnet, never 0.0.0.0, and deliberately NOT behind Authentik.
+    #
+    # opencode's searxng_search tool talks to http://127.0.0.1:8888 from this
+    # machine, and you want it usable from another tailnet device too. That is
+    # machine-to-machine traffic (rule 6), which authenticates with service
+    # credentials rather than interactive SSO, so a forward-auth gate would be
+    # wrong here — it would break the tool while adding nothing.
+    #
+    # A public searxng would be a gift to strangers: it is a free anonymising
+    # proxy that launders their traffic through your home IP, and every query
+    # you run leaks that IP to Google and Bing.
     ports:
-      - "8888:8080"
+      - "127.0.0.1:${SEARXNG_PORT:-8888}:8080"
+      - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${SEARXNG_PORT:-8888}:8080"
     environment:
       - SEARXNG_VALKEY_URL=redis://redis:6379/0
     volumes:
