@@ -88,7 +88,7 @@ services:
       # header. OpenWebUI's WEBUI_AUTH_TRUSTED_EMAIL_HEADER then auto-logs the
       # user in by email. One login, one MFA, and the emails match the existing
       # local accounts so no history is lost.
-      traefik.http.routers.openwebui.middlewares: "authentik-forwardauth,security-headers,rate-limit"
+      traefik.http.routers.openwebui.middlewares: "rate-limit,security-headers,authentik-forwardauth"
       # Companion router so the Authentik OAuth callback can reach this host
       # WITHOUT being re-challenged by forward-auth (rule 9 deadlock). Must outrank
       # the app router, hence priority 15 vs 10.
