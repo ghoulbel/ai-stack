@@ -1,6 +1,6 @@
 services:
   # ──────────────────────────────────────────────
-  # Ollama - LLM engine (NVIDIA)
+  # Ollama - LLM engine (AMD / Vulkan on this branch)
   # ──────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
@@ -22,9 +22,32 @@ services:
     ports:
       - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
       - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${OLLAMA_PORT:-11434}:11434"
-    gpus: all
+    # ── AMD / Vulkan instead of NVIDIA CUDA ───────────────────────────────────
+    # The old host had an RTX 4060 Laptop (8 GB, sm_89) and used `gpus: all`.
+    # The new host is a GMKtec Elite ER937-AI with a Radeon 890M (gfx1151) and
+    # 64 GB of unified memory. `gpus: all` does nothing useful there and errors
+    # outright on a machine without the NVIDIA container toolkit.
+    #
+    # OLLAMA_VULKAN=1 is deliberate, NOT an oversight. Ollama's ROCm backend has
+    # no gfx1151 support yet (upstream ollama issue #9180 is still open; the
+    # ROCm support matrix requires a card family that the 890M is not in). The
+    # Vulkan backend is the only path that works today, and it does not depend on
+    # ROCm at all.
+    #
+    # Expect different performance: the 890M shares system memory with the CPU,
+    # so capacity goes UP (a 25B Q4 fits comfortably in 64 GB unified) while
+    # per-token speed goes DOWN versus a discrete 8 GB card. OLLAMA_KEEP_ALIVE=0
+    # matters even more here, since unified memory makes it look like there is
+    # plenty free when there is actually contention.
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - "${RENDER_GID:?RENDER_GID unset - run ../bootstrap.sh}"
+      - "${VIDEO_GID:?VIDEO_GID unset - run ../bootstrap.sh}"
     shm_size: 64g
     environment:
+      - OLLAMA_VULKAN=1
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=2
@@ -170,12 +193,39 @@ services:
       - proxy
 
   # ──────────────────────────────────────────────
-  # ComfyUI - Image Generation (NVIDIA)
+  # ComfyUI - Image Generation (AMD / ROCm on this branch)
   # ──────────────────────────────────────────────
   comfyui:
-    image: pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
+    # The old host ran the CUDA build of pytorch/pytorch. There is no ROCm image
+    # for this exact tag on Docker Hub that carries a gfx1151 PyTorch wheel, so
+    # this uses the plain CPU Ubuntu base and installs the ROCm torch itself
+    # (see the command below). COMFYUI_TORCH_INDEX lets you point at a
+    # different wheel index without editing this file.
+    image: ${COMFYUI_BASE_IMAGE:-ubuntu:24.04}
     container_name: comfyui
-    gpus: all
+    # ── AMD / ROCm ────────────────────────────────────────────────────────────
+    # The Radeon 890M is gfx1151, which NO released PyTorch ROCm build supports
+    # yet. The only wheels that target it are the AMD nightlies, indexed per
+    # architecture:
+    #   https://rocm.nightlies.amd.com/v2/gfx1151/
+    # That URL comes from ComfyUI's own vendored docs, data/comfyui/README.md:247.
+    #
+    # HONEST WARNING -- this is the one part of the migration that may simply not
+    # work. Two separate upstream problems:
+    #   1. gfx1151 has no released ROCm support; only nightlies.
+    #   2. The 890M is an iGPU with shared system memory, and ComfyUI's handling
+    #      of GTT/shared-memory allocations is still an open issue upstream
+    #      (Comfy-Org/ComfyUI#14274). It may allocate but then fail at runtime.
+    # If image generation does not work after this comes up, the FALLBACK is to
+    # run ComfyUI CPU-only: set COMFYUI_GPU=off below. It will be slow (minutes
+    # per image at 1024x1024) but it works, and OpenWebUI drives it unchanged.
+    # Do not burn a whole evening on the ROCm path before trying that.
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    group_add:
+      - "${RENDER_GID:?RENDER_GID unset - run ../bootstrap.sh}"
+      - "${VIDEO_GID:?VIDEO_GID unset - run ../bootstrap.sh}"
     # No host port. ComfyUI has NO authentication of its own -- `main.py --help`
     # exposes no --user/--password/--token flag -- so any host binding means the
     # app is usable by anyone who can reach the port. Measured while this was
@@ -223,20 +273,57 @@ services:
       traefik.http.routers.comfyui-outpost.service: "authentik-outpost"
       traefik.http.routers.comfyui-outpost.middlewares: "security-headers,rate-limit"
     shm_size: 32g
+    environment:
+      # Where to get a PyTorch that actually supports gfx1151. No released ROCm
+      # build covers this architecture, so the AMD per-arch nightly index is the
+      # only option. Override in .env if AMD moves the URL.
+      - COMFYUI_TORCH_INDEX=${COMFYUI_TORCH_INDEX:-https://rocm.nightlies.amd.com/v2/gfx1151/}
+      # FALLBACK SWITCH. Set COMFYUI_GPU=off in .env to run ComfyUI CPU-only.
+      # Slower (minutes per 1024x1024 image) but it always works, and nothing
+      # else in the stack has to change. Try this before debugging ROCm further.
+      - COMFYUI_GPU=${COMFYUI_GPU:-rocm}
+      # Tell the ROCm runtime which gfx version to pretend this card is. The 890M
+      # is gfx1151 and is newer than some ROCm components' allowlists, so they
+      # may refuse to initialise without this. 11.0.0 is the gfx11 family.
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      # Required for the gfx1151 AOTriton backend; without it PyTorch falls back
+      # to a much slower path or fails to load at all.
+      - TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+      # Lets PyTorch autotune kernels for this specific card once, at first run.
+      - PYTORCH_TUNABLEOP_ENABLED=1
+      # amd64 unified-memory carve-out. The 890M shares system RAM with the CPU,
+      # so ROCm needs a large GTT window or large allocations fail with OOM even
+      # though `free` shows plenty available.
+      - GTT_SIZE=32G
     volumes:
       - ./data/comfyui:/workspace
+    # NO `#` comments are allowed inside this folded scalar. The `>` folds every
+    # line into ONE long line, so a `#` comments out the entire remainder of the
+    # script and the container exits immediately having installed nothing. That
+    # bug was written here once and caught by rendering `docker compose config`.
+    #
+    # The `$$VAR` references are resolved by the SHELL inside the container at
+    # runtime, NOT by compose at config time. Compose interpolates `command`
+    # from .env and the host shell only -- the `environment:` list below is NOT
+    # visible to it -- so `${COMFYUI_TORCH_INDEX:-x}` here would arrive EMPTY.
+    # That was the second bug caught the same way: `--index-url` rendered with no
+    # URL after it. Hence shell-side defaults (`${VAR:-default}` in shell) and
+    # `$$` escaping so compose passes a literal `$` through to the shell.
     command: >
       bash -c "
-      apt-get update &&
-      apt-get install -y --no-install-recommends libxcb1 libgl1 libglib2.0-0 &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore torchvision==0.27.1 torchaudio==2.11.0 &&
-      grep -vE '^(torch|torchvision|torchaudio|xformers)([<>=!~]|$)' /workspace/requirements.txt > /tmp/requirements-comfyui.txt &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /tmp/requirements-comfyui.txt &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_PuLID_Flux_ll/requirements.txt &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_Patches_ll/requirements.txt &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI-GGUF/requirements.txt &&
-      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore --no-deps facenet-pytorch==2.6.0 &&
-      python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --force-fp16 --use-pytorch-cross-attention --preview-method none --lowvram
+      set -e;
+      apt-get update;
+      apt-get install -y --no-install-recommends libxcb1 libgl1 libglib2.0-0 python3-pip git;
+      TORCH_INDEX=$${COMFYUI_TORCH_INDEX:-https://rocm.nightlies.amd.com/v2/gfx1151/};
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore torch torchvision torchaudio --index-url $$TORCH_INDEX;
+      grep -vE '^(torch|torchvision|torchaudio|xformers)([<>=!~]|$$)' /workspace/requirements.txt > /tmp/requirements-comfyui.txt;
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /tmp/requirements-comfyui.txt;
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_PuLID_Flux_ll/requirements.txt;
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI_Patches_ll/requirements.txt;
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore -r /workspace/custom_nodes/ComfyUI-GGUF/requirements.txt;
+      python3 -m pip install --break-system-packages --no-cache-dir --root-user-action=ignore --no-deps facenet-pytorch==2.6.0;
+      GPUFLAG=''; if [ "$${COMFYUI_GPU}" = "off" ]; then GPUFLAG='--cpu'; fi;
+      exec python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention --preview-method none --lowvram $$GPUFLAG
       "
     restart: unless-stopped
     networks:
