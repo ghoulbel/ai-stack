@@ -166,14 +166,14 @@ services:
     image: pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
     container_name: comfyui
     gpus: all
-    # Loopback + tailnet, never 0.0.0.0. The ComfyUI web UI lets anyone who can
-    # reach it queue jobs on the GPU and read the workflow library. OpenWebUI
-    # reaches it over ai-net, so it does not need a published port at all; the
-    # two entries below are for driving it from this machine or another
-    # tailnet device.
+    # LAN reachable on purpose -- you drive image generation from your phone and
+    # laptop. The Cloudflare tunnel deliberately does NOT route comfyui, so this
+    # is home-LAN only, and ComfyUI has no login of its own: anyone on the home
+    # Wi-Fi can queue jobs on the GPU. That is the same trust level as the *arr
+    # admin UIs. If you ever want it off the LAN, put it behind Traefik with
+    # the Authentik forward-auth gate instead of moving the port back.
     ports:
-      - "127.0.0.1:${COMFYUI_PORT:-8188}:8188"
-      - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${COMFYUI_PORT:-8188}:8188"
+      - "${COMFYUI_PORT:-8188}:8188"
     shm_size: 32g
     volumes:
       - ./data/comfyui:/workspace
