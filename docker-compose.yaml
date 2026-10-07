@@ -29,8 +29,34 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
-    ports:
-      - "3000:8080"
+    # No `ports:` on purpose. This host is reachable only through Traefik, which
+    # is the single front door for every human-facing service.
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "proxy"
+      traefik.http.routers.openwebui.rule: Host(`openwebui.ghoulhub.uk`)
+      traefik.http.routers.openwebui.entrypoints: "websecure"
+      traefik.http.routers.openwebui.tls: "true"
+      traefik.http.routers.openwebui.tls.certresolver: "le"
+      traefik.http.routers.openwebui.priority: "10"
+      # Traefik forward-auth IS the login. OpenWebUI's own OIDC path is broken
+      # against Authentik (authlib lazily GETs the issuer root, Authentik answers
+      # 302 -> /.well-known/openid-configuration, and raise_for_status() throws),
+      # so instead we let Traefik authenticate once and inject the identity as a
+      # header. OpenWebUI's WEBUI_AUTH_TRUSTED_EMAIL_HEADER then auto-logs the
+      # user in by email. One login, one MFA, and the emails match the existing
+      # local accounts so no history is lost.
+      traefik.http.routers.openwebui.middlewares: "authentik-forwardauth,security-headers,rate-limit"
+      # Companion router so the Authentik OAuth callback can reach this host
+      # WITHOUT being re-challenged by forward-auth (rule 9 deadlock). Must outrank
+      # the app router, hence priority 15 vs 10.
+      traefik.http.routers.openwebui-outpost.rule: Host(`openwebui.ghoulhub.uk`) && PathPrefix(`/outpost.goauthentik.io/`)
+      traefik.http.routers.openwebui-outpost.entrypoints: "websecure"
+      traefik.http.routers.openwebui-outpost.tls: "true"
+      traefik.http.routers.openwebui-outpost.tls.certresolver: "le"
+      traefik.http.routers.openwebui-outpost.priority: "15"
+      traefik.http.routers.openwebui-outpost.service: "authentik-outpost"
+      traefik.http.routers.openwebui-outpost.middlewares: "security-headers,rate-limit"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - ENABLE_IMAGE_GENERATION=true
@@ -41,6 +67,43 @@ services:
       - WEB_SEARCH_CONCURRENT_REQUESTS=4
       - WEB_SEARCH_TRUST_ENV=true
       - ENABLE_PERSISTENT_CONFIG=true
+      # --- Authentik OIDC -------------------------------------------------
+      # The spec ranks OIDC above forward-auth, so OpenWebUI authenticates
+      # against Authentik directly rather than being gated at the proxy.
+      - WEBUI_URL=https://openwebui.ghoulhub.uk
+      - ENABLE_OAUTH=true
+      # Single-login: Traefik forward-auth has already authenticated the request
+      # and forwarded the identity in X-authentik-*. OpenWebUI trusts that header
+      # and auto-logs in by email (auto-creating the user if new), so there is no
+      # second login form. Emails match the existing local accounts, so existing
+      # users keep their chats and roles.
+      # NOTE: do NOT set ENABLE_PASSWORD_AUTH=false. /api/v1/auths/signin checks
+      # that flag BEFORE the trusted-header branch and would 403 the entire flow.
+      # Deliberately NOT setting WEBUI_AUTH_TRUSTED_ROLE_HEADER: role is left
+      # untouched so the existing admin account keeps admin.
+      - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-authentik-email
+      - WEBUI_AUTH_TRUSTED_NAME_HEADER=X-authentik-name
+      - OAUTH_CLIENT_ID=openwebui
+      - OAUTH_CLIENT_SECRET=${OPENWEBUI_OAUTH_SECRET:?run ../identity-stack/bootstrap.sh}
+      # Must be the ISSUER ROOT. OpenWebUI builds OIDC discovery candidates from this
+      # value (including <issuer>/.well-known/openid-configuration, which Authentik
+      # serves with a 200). Pointing it at the discovery document instead breaks
+      # candidate generation and the provider fails to initialise (404).
+      - OPENID_PROVIDER_URL=https://sso.ghoulhub.uk/application/o/openwebui/
+      - OAUTH_SCOPES=openid email profile
+      - OAUTH_PROVIDER_NAME=Authentik
+      # `name` is the display name ("Belhassen Ghoul") and would collide across
+      # users; preferred_username is the stable per-account handle.
+      - OAUTH_USERNAME_CLAIM=preferred_username
+      - OAUTH_EMAIL_CLAIM=email
+      - OAUTH_CODE_CHALLENGE_METHOD=S256
+      # Let Authentik create the account on first login.
+      - ENABLE_OAUTH_SIGNUP=true
+      # Close self-registration: openwebui.ghoulhub.uk is publicly reachable, so
+      # leaving this on lets anyone on the internet create an account and spend
+      # local GPU time. This only blocks NEW signups — the three existing local
+      # accounts keep working until each person has moved to OIDC.
+      - ENABLE_SIGNUP=false
     volumes:
       - ./data/webui:/app/backend/data
       - ./data/webui/config/images:/app/backend/open_webui/utils/images
@@ -52,6 +115,7 @@ services:
     restart: unless-stopped
     networks:
       - ai-net
+      - proxy
 
   # ──────────────────────────────────────────────
   # ComfyUI - Image Generation (NVIDIA)
@@ -141,3 +205,7 @@ services:
 networks:
   ai-net:
     driver: bridge
+  # Created by ../bootstrap.sh. Shared with Traefik and every app stack so a
+  # service can be published without ever binding a host port.
+  proxy:
+    external: true
