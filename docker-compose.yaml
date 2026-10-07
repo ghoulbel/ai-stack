@@ -34,6 +34,20 @@ services:
       # sends an Origin, so this only restricts the browser-accessible UI.
       - OLLAMA_ORIGINS=http://localhost:11434,http://127.0.0.1:11434,http://${TAILSCALE_IP:?}:11434
       - OLLAMA_CONTEXT_LENGTH=32768
+      # Release VRAM as soon as a response finishes. The RTX 4060 Laptop has
+      # 8188 MiB TOTAL and two very different jobs want it: a 25B Q4 LLM and a
+      # bf16 diffusion model generating at 1024x1024. They cannot coexist.
+      # With no keep-alive set, something in the request path asked for -1 and
+      # llama-server sat on 7518 MiB indefinitely ("expires_at": 2319-01-17),
+      # leaving ComfyUI 87 MiB and failing every image with:
+      #   torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory
+      # 0 is deliberately NOT a small number like 5m: OpenWebUI generates the
+      # prompt with the LLM and then immediately calls ComfyUI, so any keep-alive
+      # long enough to smooth back-to-back requests still leaves the diffusion
+      # model starved. Ollama keeps the model resident for the whole duration of
+      # an in-flight request, so 0 costs nothing during generation and frees
+      # everything the moment it completes.
+      - OLLAMA_KEEP_ALIVE=0
       # - OLLAMA_NUM_GPU=31
     volumes:
       - ./data/ollama:/root/.ollama
