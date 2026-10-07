@@ -45,7 +45,22 @@ services:
   # Open-WebUI - Frontend
   # ──────────────────────────────────────────────
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    # Pinned by DIGEST, not by version tag, and deliberately not ":main".
+    #
+    # ":main" can change under you between restarts, which for this app means an
+    # untested upgrade landing on a live service holding real chat history and
+    # user accounts. A plain "v0.11.4" tag is NOT an acceptable substitute here:
+    # this build self-reports version 0.11.4 but its digest differs from the
+    # published v0.11.4 tag, so switching to that tag would be a silent
+    # DOWNGRADE to a different build of the same version number.
+    #
+    # To upgrade deliberately:
+    #   docker pull ghcr.io/open-webui/open-webui:main
+    #   docker image inspect ghcr.io/open-webui/open-webui:main \
+    #     --format '{{index .RepoDigests 0}}'
+    # then paste the new digest here, bring it up, and verify in Grafana that
+    # open-webui's request/error rate did not move.
+    image: ghcr.io/open-webui/open-webui@sha256:8b432fe0a65b91116afc7961365c6cca5379cc923171386a96691f3471f3cae9
     container_name: open-webui
     # Human access: Traefik only, which is the single front door. This host is
     # never published on 0.0.0.0.
@@ -196,7 +211,9 @@ services:
   # MCPO - Fast Search Bridge
   # ──────────────────────────────────────────────
   mcpo:
-    image: ghcr.io/open-webui/mcpo:main
+    # Pinned by digest for the same reason as open-webui above: ":main" can
+    # change under you on restart. Same upgrade procedure.
+    image: ghcr.io/open-webui/mcpo@sha256:1e82c9555c19e50b80745705f32b47a2647589f35279527b5118ecd3a71bd467
     container_name: mcpo
     volumes:
       - ./data/mcpo:/app/config
