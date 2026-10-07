@@ -1,9 +1,9 @@
 services:
   # ──────────────────────────────────────────────
-  # Ollama - LLM engine (AMD / Vulkan on this branch)
+  # Ollama - LLM engine (NVIDIA)
   # ──────────────────────────────────────────────
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:rocm
     container_name: ollama
     # Loopback + tailnet only, never 0.0.0.0. Ollama has no authentication of
     # any kind, so anything that can open this port can run any model on the
@@ -22,32 +22,18 @@ services:
     ports:
       - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
       - "${TAILSCALE_IP:?TAILSCALE_IP unset - run ../bootstrap.sh}:${OLLAMA_PORT:-11434}:11434"
-    # ── AMD / Vulkan instead of NVIDIA CUDA ───────────────────────────────────
-    # The old host had an RTX 4060 Laptop (8 GB, sm_89) and used `gpus: all`.
-    # The new host is a GMKtec Elite ER937-AI with a Radeon 890M (gfx1151) and
-    # 64 GB of unified memory. `gpus: all` does nothing useful there and errors
-    # outright on a machine without the NVIDIA container toolkit.
-    #
-    # OLLAMA_VULKAN=1 is deliberate, NOT an oversight. Ollama's ROCm backend has
-    # no gfx1151 support yet (upstream ollama issue #9180 is still open; the
-    # ROCm support matrix requires a card family that the 890M is not in). The
-    # Vulkan backend is the only path that works today, and it does not depend on
-    # ROCm at all.
-    #
-    # Expect different performance: the 890M shares system memory with the CPU,
-    # so capacity goes UP (a 25B Q4 fits comfortably in 64 GB unified) while
-    # per-token speed goes DOWN versus a discrete 8 GB card. OLLAMA_KEEP_ALIVE=0
-    # matters even more here, since unified memory makes it look like there is
-    # plenty free when there is actually contention.
     devices:
-      - /dev/dri:/dev/dri
       - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
     group_add:
+      - video
       - "${RENDER_GID:?RENDER_GID unset - run ../bootstrap.sh}"
-      - "${VIDEO_GID:?VIDEO_GID unset - run ../bootstrap.sh}"
     shm_size: 64g
     environment:
-      - OLLAMA_VULKAN=1
+      # iGPU enablement, straight from docker-compose.yaml.minix-recovered.
+      - OLLAMA_IGPU_ENABLE=1
+      - ROCR_VISIBLE_DEVICES=0
+      - HSA_ENABLE_SDMA=1
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=2
@@ -193,58 +179,24 @@ services:
       - proxy
 
   # ──────────────────────────────────────────────
-  # ComfyUI - Image Generation (AMD / ROCm on this branch)
+  # ComfyUI - Image Generation (NVIDIA)
   # ──────────────────────────────────────────────
   comfyui:
-    # This is the configuration that actually ran on the old MiniX, which also
-    # had a Radeon 890M. `rocm/pytorch:latest` already ships a working
-    # ROCm-enabled PyTorch, so there is nothing to install and no wheel index
-    # to point at -- an earlier version of this branch tried to pip-install
-    # torch from rocm.nightlies.amd.com/v2/gfx1151/ and that was unnecessary.
-    # `latest` can drift, so if it stops working pin a specific tag such as
-    # rocm/pytorch:rocm7.1. COMFYUI_BASE_IMAGE exists so you can do that from
-    # .env without editing this file.
-    image: ${COMFYUI_BASE_IMAGE:-rocm/pytorch:latest}
+    image: rocm/pytorch:latest   # Keep this for now; if unstable, try a specific tag like rocm/pytorch:rocm7.1 or nightly if available
     container_name: comfyui
-    # ── AMD / ROCm ────────────────────────────────────────────────────────────
-    # The Radeon 890M is gfx1151, which NO released PyTorch ROCm build supports
-    # yet. The only wheels that target it are the AMD nightlies, indexed per
-    # architecture:
-    #   https://rocm.nightlies.amd.com/v2/gfx1151/
-    # That URL comes from ComfyUI's own vendored docs, data/comfyui/README.md:247.
-    #
-    # HONEST WARNING -- this is the one part of the migration that may simply not
-    # work. Two separate upstream problems:
-    #   1. gfx1151 has no released ROCm support; only nightlies.
-    #   2. The 890M is an iGPU with shared system memory, and ComfyUI's handling
-    #      of GTT/shared-memory allocations is still an open issue upstream
-    #      (Comfy-Org/ComfyUI#14274). It may allocate but then fail at runtime.
-    # If image generation does not work after this comes up, the FALLBACK is to
-    # run ComfyUI CPU-only: set COMFYUI_GPU=off below. It will be slow (minutes
-    # per image at 1024x1024) but it works, and OpenWebUI drives it unchanged.
-    # Do not burn a whole evening on the ROCm path before trying that.
     devices:
-      - /dev/dri:/dev/dri
       - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
     group_add:
+      - video
       - "${RENDER_GID:?RENDER_GID unset - run ../bootstrap.sh}"
-      - "${VIDEO_GID:?VIDEO_GID unset - run ../bootstrap.sh}"
-    # No host port. ComfyUI has NO authentication of its own -- `main.py --help`
-    # exposes no --user/--password/--token flag -- so any host binding means the
-    # app is usable by anyone who can reach the port. Measured while this was
-    # still published on the LAN, unauthenticated:
-    #   GET  /api/system_stats -> 200  (host RAM, python/pytorch versions, argv)
-    #   GET  /history           -> 200  (every prompt and generated image ever made)
-    #   POST /upload/image      -> 200  (writes a file into the ./data/comfyui
-    #                                 bind mount on the host)
-    #   POST /prompt            -> runs a workflow, i.e. spends GPU time
-    # (GET /view with ../../ traversal is already rejected with 400, so that one
-    # is patched -- but the four above are not.)
-    # Forward-auth is therefore the ONLY integration ComfyUI can take: it has no
-    # session or cookie concept to hook trusted headers into the way OpenWebUI
-    # does, but forward-auth does not need one. It refuses the request outright
-    # unless the browser already holds a valid Authentik session on
-    # .ghoulhub.uk, so nothing reaches ComfyUI unauthenticated.
+    shm_size: 32g   # Good; you can try 48g or 64g if host has free RAM and still OOM
+    environment:
+      - HIP_VISIBLE_DEVICES=0             # ← Add this: Ensures only the iGPU is visible
+      - ROCR_VISIBLE_DEVICES=0            # ← Keep, but redundant with HIP_VISIBLE_DEVICES
+      - PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512   # ← Tune: Lower threshold/mb helps alloc fails; try 0.6 / 512 if still failing
+      - TORCH_BLAS_PREFER_HIPBLASLT=0     # ← Critical: Disable HIPBLASLt to avoid "unsupported arch" → alloc failed chain
+      - LD_PRELOAD=                       # Keep empty
     labels:
       traefik.enable: "true"
       traefik.docker.network: "proxy"
@@ -275,69 +227,22 @@ services:
       traefik.http.routers.comfyui-outpost.priority: "15"
       traefik.http.routers.comfyui-outpost.service: "authentik-outpost"
       traefik.http.routers.comfyui-outpost.middlewares: "security-headers,rate-limit"
-    shm_size: 32g
-    environment:
-      # Where to get a PyTorch that actually supports gfx1151. No released ROCm
-      # build covers this architecture, so the AMD per-arch nightly index is the
-      # only option. Override in .env if AMD moves the URL.
-      # FALLBACK SWITCH. Set COMFYUI_GPU=off in .env to run ComfyUI CPU-only.
-      # Slower (minutes per 1024x1024 image) but it always works, and nothing
-      # else in the stack has to change. Try this before debugging ROCm further.
-      - COMFYUI_GPU=${COMFYUI_GPU:-rocm}
-      # Tell the ROCm runtime which gfx version to pretend this card is. The 890M
-      # is gfx1151 and is newer than some ROCm components' allowlists, so they
-      # may refuse to initialise without this. 11.0.0 is the gfx11 family.
-      # Required for the gfx1151 AOTriton backend; without it PyTorch falls back
-      # to a much slower path or fails to load at all.
-      # Proven on the old MiniX (also a 890M). These are not boilerplate:
-      # TORCH_BLAS_PREFER_HIPBLASLT=0 is the important one -- with HIPBLASLt
-      # enabled on this iGPU you get an "unsupported arch" error that cascades
-      # into allocation failures. PYTORCH_HIP_ALLOC_CONF keeps the GC threshold
-      # and split size tuned for shared system memory; drop the threshold to 0.6
-      # if allocations still fail.
-      - HIP_VISIBLE_DEVICES=0
-      - ROCR_VISIBLE_DEVICES=0
-      - PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
-      - TORCH_BLAS_PREFER_HIPBLASLT=0
-      # Large unified-memory carve-out for the 890M, which shares system RAM
-      # with the CPU.
-      - GTT_SIZE=32G
-      # COMFYUI_GPU=off adds --cpu to the command below. This is a last resort,
-      # not an expectation: the GPU path is what ran on the MiniX.
-      - COMFYUI_GPU=${COMFYUI_GPU:-rocm}
     volumes:
       - ./data/comfyui:/workspace
-    # NO `#` comments are allowed inside this folded scalar. The `>` folds every
-    # line into ONE long line, so a `#` comments out the entire remainder of the
-    # script and the container exits immediately having installed nothing. That
-    # bug was written here once and caught by rendering `docker compose config`.
-    #
-    # The `$$VAR` references are resolved by the SHELL inside the container at
-    # runtime, NOT by compose at config time. Compose interpolates `command`
-    # from .env and the host shell only -- the `environment:` list below is NOT
-    # visible to it -- so `${COMFYUI_TORCH_INDEX:-x}` here would arrive EMPTY.
-    # That was the second bug caught the same way: `--index-url` rendered with no
-    # URL after it. Hence shell-side defaults (`${VAR:-default}` in shell) and
-    # `$$` escaping so compose passes a literal `$` through to the shell.
-    # NO `#` comments inside this folded scalar: `>` folds every line into one,
-    # so a `#` comments out the entire remainder of the script and the container
-    # exits having installed nothing. Keep the commentary above the scalar.
     command: >
       bash -c "
-      set -e;
-      python3 -m pip install --upgrade pip setuptools wheel;
-      python3 -m pip install -r /workspace/requirements.txt;
-      python3 -m pip install -r /workspace/custom_nodes/ComfyUI_PuLID_Flux_ll/requirements.txt;
-      python3 -m pip install facenet-pytorch --no-deps;
-      python3 -m pip install -r /workspace/custom_nodes/ComfyUI_Patches_ll/requirements.txt;
-      python3 -m pip install -r /workspace/custom_nodes/ComfyUI-GGUF/requirements.txt;
-      GPUFLAG=''; if [ "$${COMFYUI_GPU}" = "off" ]; then GPUFLAG='--cpu'; fi;
-      exec python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --force-fp16 --use-pytorch-cross-attention --preview-method none --cpu-vae --lowvram --disable-smart-memory --disable-pinned-memory $$GPUFLAG
+      python3 -m pip install --upgrade pip setuptools wheel &&
+      python3 -m pip install -r /workspace/requirements.txt &&
+      python3 -m pip install -r /workspace/custom_nodes/ComfyUI_PuLID_Flux_ll/requirements.txt &&
+      python3 -m pip install facenet-pytorch --no-deps &&
+      python3 -m pip install -r /workspace/custom_nodes/ComfyUI_Patches_ll/requirements.txt &&
+      python3 -m pip install -r /workspace/custom_nodes/ComfyUI-GGUF/requirements.txt &&
+      python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --force-fp16 --use-pytorch-cross-attention --preview-method none --cpu-vae --lowvram --disable-smart-memory --disable-pinned-memory
       "
     restart: unless-stopped
     networks:
-      - ai-net
       - proxy
+      - ai-net
 
   # ──────────────────────────────────────────────
   # Qdrant - Vector DB
