@@ -162,14 +162,52 @@ services:
     image: pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
     container_name: comfyui
     gpus: all
-    # LAN reachable on purpose -- you drive image generation from your phone and
-    # laptop. The Cloudflare tunnel deliberately does NOT route comfyui, so this
-    # is home-LAN only, and ComfyUI has no login of its own: anyone on the home
-    # Wi-Fi can queue jobs on the GPU. That is the same trust level as the *arr
-    # admin UIs. If you ever want it off the LAN, put it behind Traefik with
-    # the Authentik forward-auth gate instead of moving the port back.
-    ports:
-      - "${COMFYUI_PORT:-8188}:8188"
+    # No host port. ComfyUI has NO authentication of its own -- `main.py --help`
+    # exposes no --user/--password/--token flag -- so any host binding means the
+    # app is usable by anyone who can reach the port. Measured while this was
+    # still published on the LAN, unauthenticated:
+    #   GET  /api/system_stats -> 200  (host RAM, python/pytorch versions, argv)
+    #   GET  /history           -> 200  (every prompt and generated image ever made)
+    #   POST /upload/image      -> 200  (writes a file into the ./data/comfyui
+    #                                 bind mount on the host)
+    #   POST /prompt            -> runs a workflow, i.e. spends GPU time
+    # (GET /view with ../../ traversal is already rejected with 400, so that one
+    # is patched -- but the four above are not.)
+    # Forward-auth is therefore the ONLY integration ComfyUI can take: it has no
+    # session or cookie concept to hook trusted headers into the way OpenWebUI
+    # does, but forward-auth does not need one. It refuses the request outright
+    # unless the browser already holds a valid Authentik session on
+    # .ghoulhub.uk, so nothing reaches ComfyUI unauthenticated.
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "proxy"
+      traefik.http.routers.comfyui.rule: Host(`comfyui.ghoulhub.uk`)
+      traefik.http.routers.comfyui.entrypoints: "websecure"
+      traefik.http.routers.comfyui.tls: "true"
+      traefik.http.routers.comfyui.tls.certresolver: "le"
+      traefik.http.routers.comfyui.priority: "10"
+      # REQUIRED. The pytorch/pytorch image has no EXPOSE directive, and this
+      # service no longer has a published port either, so Traefik has nothing to
+      # infer the container port from and the router silently disappears:
+      #   ERR service "comfyui-ai-stack" error: port is missing  providerName=docker
+      # which surfaces as a bare 404 with no hint of the cause. open-webui does
+      # not need this because its image exposes 8080.
+      traefik.http.services.comfyui.loadbalancer.server.port: "8188"
+      # rate-limit and security-headers FIRST, authentik-forwardauth LAST. Traefik
+      # runs middlewares left to right and stops at the first one that ends the
+      # request, so a short-circuiting middleware placed first would send every
+      # anonymous visitor to Authentik without ever passing the rate limiter.
+      traefik.http.routers.comfyui.middlewares: "rate-limit,security-headers,authentik-forwardauth"
+      # Companion router so the Authentik OAuth callback can return to this host
+      # without being re-challenged by forward-auth (rule 9 deadlock). Priority 15
+      # outranks the app router's 10.
+      traefik.http.routers.comfyui-outpost.rule: Host(`comfyui.ghoulhub.uk`) && PathPrefix(`/outpost.goauthentik.io/`)
+      traefik.http.routers.comfyui-outpost.entrypoints: "websecure"
+      traefik.http.routers.comfyui-outpost.tls: "true"
+      traefik.http.routers.comfyui-outpost.tls.certresolver: "le"
+      traefik.http.routers.comfyui-outpost.priority: "15"
+      traefik.http.routers.comfyui-outpost.service: "authentik-outpost"
+      traefik.http.routers.comfyui-outpost.middlewares: "security-headers,rate-limit"
     shm_size: 32g
     volumes:
       - ./data/comfyui:/workspace
@@ -189,6 +227,7 @@ services:
     restart: unless-stopped
     networks:
       - ai-net
+      - proxy
 
   # ──────────────────────────────────────────────
   # Qdrant - Vector DB
