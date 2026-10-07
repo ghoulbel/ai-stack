@@ -109,11 +109,16 @@ services:
       - WEB_SEARCH_CONCURRENT_REQUESTS=4
       - WEB_SEARCH_TRUST_ENV=true
       - ENABLE_PERSISTENT_CONFIG=true
-      # --- Authentik OIDC -------------------------------------------------
-      # The spec ranks OIDC above forward-auth, so OpenWebUI authenticates
-      # against Authentik directly rather than being gated at the proxy.
+# --- Authentik: Traefik forward-auth + trusted header ----------------
+      # Forward-auth IS the login here, not native OIDC. Do not "upgrade" this
+      # back to native OIDC: OpenWebUI's authlib integration cannot talk to
+      # Authentik. It lazily GETs the ISSUER ROOT, Authentik answers 302 ->
+      # /.well-known/openid-configuration, and raise_for_status() throws, so
+      # /oauth/oidc/login returns HTTP 500. Pointing OPENID_PROVIDER_URL at the
+      # discovery document instead makes OpenWebUI build malformed discovery
+      # candidates and the provider never initialises (404). There is no env var
+      # for an explicit metadata URL, so native OIDC is simply not an option.
       - WEBUI_URL=https://openwebui.ghoulhub.uk
-      - ENABLE_OAUTH=true
       # Single-login: Traefik forward-auth has already authenticated the request
       # and forwarded the identity in X-authentik-*. OpenWebUI trusts that header
       # and auto-logs in by email (auto-creating the user if new), so there is no
@@ -125,26 +130,17 @@ services:
       # untouched so the existing admin account keeps admin.
       - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-authentik-email
       - WEBUI_AUTH_TRUSTED_NAME_HEADER=X-authentik-name
-      - OAUTH_CLIENT_ID=openwebui
-      - OAUTH_CLIENT_SECRET=${OPENWEBUI_OAUTH_SECRET:?run ../identity-stack/bootstrap.sh}
-      # Must be the ISSUER ROOT. OpenWebUI builds OIDC discovery candidates from this
-      # value (including <issuer>/.well-known/openid-configuration, which Authentik
-      # serves with a 200). Pointing it at the discovery document instead breaks
-      # candidate generation and the provider fails to initialise (404).
-      - OPENID_PROVIDER_URL=https://sso.ghoulhub.uk/application/o/openwebui/
-      - OAUTH_SCOPES=openid email profile
-      - OAUTH_PROVIDER_NAME=Authentik
-      # `name` is the display name ("Belhassen Ghoul") and would collide across
-      # users; preferred_username is the stable per-account handle.
-      - OAUTH_USERNAME_CLAIM=preferred_username
-      - OAUTH_EMAIL_CLAIM=email
-      - OAUTH_CODE_CHALLENGE_METHOD=S256
-      # Let Authentik create the account on first login.
-      - ENABLE_OAUTH_SIGNUP=true
+      # MUST be explicitly false, not merely absent: OpenWebUI defaults
+      # ENABLE_OAUTH to true, and any advertised OIDC provider makes the SPA
+      # render a "Sign in with Authentik" button that 500s (see above). That
+      # button is what produced the reported "logs in, then bounces back to the
+      # SSO start page" loop. Disabled here so the only path in is the trusted
+      # header, which the SPA drives automatically with empty credentials
+      # (userSignIn('', '')) whenever features.auth_trusted_header is true.
+      - ENABLE_OAUTH=false
       # Close self-registration: openwebui.ghoulhub.uk is publicly reachable, so
       # leaving this on lets anyone on the internet create an account and spend
-      # local GPU time. This only blocks NEW signups — the three existing local
-      # accounts keep working until each person has moved to OIDC.
+      # local GPU time.
       - ENABLE_SIGNUP=false
     volumes:
       - ./data/webui:/app/backend/data
