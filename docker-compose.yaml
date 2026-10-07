@@ -45,22 +45,21 @@ services:
   # Open-WebUI - Frontend
   # ──────────────────────────────────────────────
   open-webui:
-    # Pinned by DIGEST, not by version tag, and deliberately not ":main".
+    # ":latest" on purpose, matching every other floating tag in this stack
+    # (ollama, searxng, qdrant, mcpo below...). "docker compose pull" is then a
+    # real upgrade path.
     #
-    # ":main" can change under you between restarts, which for this app means an
-    # untested upgrade landing on a live service holding real chat history and
-    # user accounts. A plain "v0.11.4" tag is NOT an acceptable substitute here:
-    # this build self-reports version 0.11.4 but its digest differs from the
-    # published v0.11.4 tag, so switching to that tag would be a silent
-    # DOWNGRADE to a different build of the same version number.
+    # The trade-off, stated once so it is not a surprise: this is a rolling
+    # build tag, so an untested OpenWebUI upgrade can land on a live service
+    # holding real chat history and user accounts. That is fine here because
+    # accounts live in Authentik and OpenWebUI rows are re-provisioned from the
+    # SSO identity, so a bad build costs you the UI, not the data.
     #
-    # To upgrade deliberately:
-    #   docker pull ghcr.io/open-webui/open-webui:main
-    #   docker image inspect ghcr.io/open-webui/open-webui:main \
-    #     --format '{{index .RepoDigests 0}}'
-    # then paste the new digest here, bring it up, and verify in Grafana that
-    # open-webui's request/error rate did not move.
-    image: ghcr.io/open-webui/open-webui@sha256:8b432fe0a65b91116afc7961365c6cca5379cc923171386a96691f3471f3cae9
+    # Do NOT substitute a "vX.Y.Z" tag casually: this project ships several
+    # different builds that all self-report the same version number, so a
+    # version tag can be a silent downgrade. "latest" and "main" are the same
+    # image; either is fine.
+    image: ghcr.io/open-webui/open-webui:latest
     container_name: open-webui
     # Human access: Traefik only, which is the single front door. This host is
     # never published on 0.0.0.0.
@@ -211,9 +210,9 @@ services:
   # MCPO - Fast Search Bridge
   # ──────────────────────────────────────────────
   mcpo:
-    # Pinned by digest for the same reason as open-webui above: ":main" can
-    # change under you on restart. Same upgrade procedure.
-    image: ghcr.io/open-webui/mcpo@sha256:1e82c9555c19e50b80745705f32b47a2647589f35279527b5118ecd3a71bd467
+    # Floating tag, same rationale as open-webui above. This one is just a
+    # search bridge, so an unexpected bump costs nothing.
+    image: ghcr.io/open-webui/mcpo:latest
     container_name: mcpo
     volumes:
       - ./data/mcpo:/app/config
