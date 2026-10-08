@@ -83,7 +83,7 @@ services:
     # different builds that all self-report the same version number, so a
     # version tag can be a silent downgrade. "latest" and "main" are the same
     # image; either is fine.
-    image: ghcr.io/open-webui/open-webui:latest
+    image: ghcr.io/open-webui/open-webui@sha256:8b432fe0a65b91116afc7961365c6cca5379cc923171386a96691f3471f3cae9
     container_name: open-webui
     # Human access: Traefik only, which is the single front door. This host is
     # never published on 0.0.0.0.
@@ -182,7 +182,7 @@ services:
   # ComfyUI - Image Generation (NVIDIA)
   # ──────────────────────────────────────────────
   comfyui:
-    image: rocm/pytorch:latest   # Keep this for now; if unstable, try a specific tag like rocm/pytorch:rocm7.1 or nightly if available
+    image: rocm/pytorch@sha256:099f59a3bee9c436f5cc57db6bc6076fdeda579c57e9e22ae40f856d5905b3e4
     container_name: comfyui
     devices:
       - /dev/kfd:/dev/kfd
@@ -247,7 +247,7 @@ services:
   # Qdrant - Vector DB
   # ──────────────────────────────────────────────
   vectordb:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant@sha256:b7b0444c4c351c970b98e90a6f89c2ee4287c65b44e52b4cb503fa5b2aa927ad
     container_name: vectordb
     volumes:
       - ./data/qdrant:/qdrant/storage
@@ -261,7 +261,7 @@ services:
   mcpo:
     # Floating tag, same rationale as open-webui above. This one is just a
     # search bridge, so an unexpected bump costs nothing.
-    image: ghcr.io/open-webui/mcpo:latest
+    image: ghcr.io/open-webui/mcpo@sha256:1e82c9555c19e50b80745705f32b47a2647589f35279527b5118ecd3a71bd467
     container_name: mcpo
     volumes:
       - ./data/mcpo:/app/config
@@ -276,7 +276,7 @@ services:
   # SearXNG - Meta Search
   # ──────────────────────────────────────────────
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng@sha256:cc026dbee25b864d7f9731957cd5ef36ba2e2d61abd2996d57f1b863483e7409
     container_name: searxng
     # Loopback + tailnet, never 0.0.0.0, and deliberately NOT behind Authentik.
     #
@@ -308,6 +308,12 @@ services:
   # ──────────────────────────────────────────────
   redis:
     image: valkey/valkey:8-alpine
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     container_name: redis
     restart: unless-stopped
     networks:
