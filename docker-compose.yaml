@@ -3,7 +3,7 @@ services:
   # Ollama - LLM engine (NVIDIA)
   # ──────────────────────────────────────────────
   ollama:
-    image: ollama/ollama:rocm
+    image: ollama/ollama@sha256:69f27594d8127cb43db1edcafa5e2d3cd8f88bdbc54a2cf3ceb11b8d138a24b1
     container_name: ollama
     # Loopback + tailnet only, never 0.0.0.0. Ollama has no authentication of
     # any kind, so anything that can open this port can run any model on the
@@ -31,6 +31,7 @@ services:
     shm_size: 64g
     environment:
       # iGPU enablement, straight from docker-compose.yaml.minix-recovered.
+      - GGML_VK_VISIBLE_DEVICES=0
       - OLLAMA_IGPU_ENABLE=1
       - ROCR_VISIBLE_DEVICES=0
       - HSA_ENABLE_SDMA=1
