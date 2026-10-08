@@ -232,11 +232,14 @@ services:
       - ./data/comfyui:/workspace
     command: >
       bash -c "
+      apt-get update -qq || true &&
+      (apt-get install -y -qq libxcb1 libgl1 libglib2.0-0t64 || apt-get install -y -qq libxcb1 libgl1 libglib2.0-0) || true &&
       python3 -m pip install --upgrade --ignore-installed pip setuptools wheel &&
       python3 -m pip install -r /workspace/requirements.txt &&
       for f in /workspace/custom_nodes/*/requirements.txt; do
         [ -f "$$f" ] && python3 -m pip install -r "$$f" || true
       done &&
+      python3 -m pip install facenet-pytorch --no-deps &&
       python3 /workspace/main.py --listen 0.0.0.0 --port 8188 --force-fp16 --use-pytorch-cross-attention --preview-method none --cpu-vae --lowvram --disable-smart-memory --disable-pinned-memory
       "
     restart: unless-stopped
