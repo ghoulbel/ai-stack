@@ -37,6 +37,7 @@ services:
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_HOST=0.0.0.0:11434
       # Was "*", which lets any web page you happen to visit drive your GPU.
       # Every real consumer (OpenWebUI, opencode) is server-side and never
