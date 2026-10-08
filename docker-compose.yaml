@@ -153,8 +153,6 @@ services:
       # that flag BEFORE the trusted-header branch and would 403 the entire flow.
       # Deliberately NOT setting WEBUI_AUTH_TRUSTED_ROLE_HEADER: role is left
       # untouched so the existing admin account keeps admin.
-      - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-authentik-email
-      - WEBUI_AUTH_TRUSTED_NAME_HEADER=X-authentik-name
       # MUST be explicitly false, not merely absent: OpenWebUI defaults
       # ENABLE_OAUTH to true, and any advertised OIDC provider makes the SPA
       # render a "Sign in with Authentik" button that 500s (see above). That
