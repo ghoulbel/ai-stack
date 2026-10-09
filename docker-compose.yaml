@@ -38,7 +38,7 @@ services:
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
       - OLLAMA_NUM_PARALLEL=2
-      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_MAX_LOADED_MODELS=2
       - OLLAMA_HOST=0.0.0.0:11434
       # Was "*", which lets any web page you happen to visit drive your GPU.
       # Every real consumer (OpenWebUI, opencode) is server-side and never
@@ -134,6 +134,9 @@ services:
       - WEB_SEARCH_CONCURRENT_REQUESTS=4
       - WEB_SEARCH_TRUST_ENV=true
       - ENABLE_PERSISTENT_CONFIG=true
+      # Overrides the image default sentence-transformers/all-MiniLM-L6-v2 so
+      # embeddings stay on the local ollama nomic-embed-text model.
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
 # --- Authentik: Traefik forward-auth + trusted header ----------------
       # Forward-auth IS the login here, not native OIDC. Do not "upgrade" this
       # back to native OIDC: OpenWebUI's authlib integration cannot talk to
@@ -165,6 +168,7 @@ services:
       # leaving this on lets anyone on the internet create an account and spend
       # local GPU time.
       - ENABLE_SIGNUP=false
+      - TZ=Europe/Zurich
     volumes:
       - ./data/webui:/app/backend/data
     depends_on:
@@ -298,6 +302,7 @@ services:
       - SEARXNG_VALKEY_URL=redis://redis:6379/0
     volumes:
       - ./data/searxng/config:/etc/searxng
+      - searxng-cache:/var/cache/searxng/
     depends_on:
       redis:
         condition: service_started
@@ -309,7 +314,10 @@ services:
   # Valkey - Redis-compatible cache
   # ──────────────────────────────────────────────
   redis:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey:9-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    volumes:
+      - valkey-data:/data/
     healthcheck:
       test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
       interval: 30s
@@ -320,6 +328,10 @@ services:
     restart: unless-stopped
     networks:
       - ai-net
+
+volumes:
+  valkey-data:
+  searxng-cache:
 
 networks:
   ai-net:
