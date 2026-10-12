@@ -333,6 +333,8 @@ services:
 volumes:
   valkey-data:
   searxng-cache:
+    external: true
+    name: ai-stack_searxng-cache
 
 networks:
   ai-net:
