@@ -47,7 +47,28 @@ services:
       # model starved. Ollama keeps the model resident for the whole duration of
       # an in-flight request, so 0 costs nothing during generation and frees
       # everything the moment it completes.
-      - OLLAMA_KEEP_ALIVE=0
+      # Keep models resident so every request is served from VRAM with zero
+      # cold-load. -1 = "always warm": the model stays loaded until the machine
+      # runs low on memory. Latency here is the priority, so we keep everything
+      # resident rather than freeing VRAM between requests.
+      #
+      # NOTE: this means the LLM model occupies VRAM the whole time, so it cannot
+      # coexist with ComfyUI image generation on this 8GB GPU. That was the whole
+      # point of the previous OLLAMA_KEEP_ALIVE=0 (which freed VRAM for ComfyUI).
+      # The tradeoff was flipped by design: warm LLM > composable with ComfyUI.
+      - OLLAMA_KEEP_ALIVE=-1
+      # Allow the resident LLM and the tiny (~274MB) nomic-embed-text to both
+      # stay loaded at once. Without this (default max loaded models = 1), an
+      # embedding request would evict the warm LLM from VRAM to load nomic,
+      # defeating the purpose of KEEP_ALIVE=-1. 274MB fits comfortably alongside
+      # the LLM, so this is safe.
+      - OLLAMA_MAX_LOADED_MODELS=2
+      # Enables the OpenAI-compatible /v1/embeddings endpoint that opencode's
+      # codebase-index plugin uses. Without this, Ollama refuses embeddings with
+      # "This server does not support embeddings. Start it with --embeddings".
+      # `nomic-embed-text` is the small (~274MB) local embedding model, already
+      # pulled; it maps to 768-dim vectors.
+      - OLLAMA_EMBED_MODEL=nomic-embed-text
       # - OLLAMA_NUM_GPU=31
     volumes:
       - ./data/ollama:/root/.ollama
