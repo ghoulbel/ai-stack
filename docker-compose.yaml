@@ -27,35 +27,68 @@ services:
     environment:
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
+      # 2 on purpose: opencode's `auto` agent fans out to builder/tester/reviewer
+      # subagents, so requests DO arrive concurrently. RAM scales as
+      # NUM_PARALLEL * CONTEXT_LENGTH, so each slot is another 32K context —
+      # budget for that against the 8188 MiB of VRAM on this box.
+      #
+      # MEASURED CAVEAT (2026-10-14): this currently buys nothing. Every model
+      # this stack actually serves is family qwen35 or qwen35moe, and Ollama logs
+      #   WARN sched.go: "model architecture does not currently support
+      #   parallel requests" architecture=qwen35moe
+      # on every single one of them. Parallel slots only apply to architectures
+      # that support them (e.g. gemma3 here). So concurrent requests are
+      # serialized anyway and the second slot is never used.
+      #
+      # It is left at 2 deliberately rather than 1: it is correct as soon as a
+      # parallel-capable model is added, it costs no extra VRAM for these
+      # architectures, and it is what you asked for. Just do not expect a
+      # throughput win from it today.
       - OLLAMA_NUM_PARALLEL=2
       - OLLAMA_HOST=0.0.0.0:11434
       # Was "*", which lets any web page you happen to visit drive your GPU.
       # Every real consumer (OpenWebUI, opencode) is server-side and never
       # sends an Origin, so this only restricts the browser-accessible UI.
       - OLLAMA_ORIGINS=http://localhost:11434,http://127.0.0.1:11434,http://${TAILSCALE_IP:?}:11434
-      - OLLAMA_CONTEXT_LENGTH=32768
-      # Release VRAM as soon as a response finishes. The RTX 4060 Laptop has
-      # 8188 MiB TOTAL and two very different jobs want it: a 25B Q4 LLM and a
-      # bf16 diffusion model generating at 1024x1024. They cannot coexist.
-      # With no keep-alive set, something in the request path asked for -1 and
-      # llama-server sat on 7518 MiB indefinitely ("expires_at": 2319-01-17),
-      # leaving ComfyUI 87 MiB and failing every image with:
-      #   torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory
-      # 0 is deliberately NOT a small number like 5m: OpenWebUI generates the
-      # prompt with the LLM and then immediately calls ComfyUI, so any keep-alive
-      # long enough to smooth back-to-back requests still leaves the diffusion
-      # model starved. Ollama keeps the model resident for the whole duration of
-      # an in-flight request, so 0 costs nothing during generation and frees
-      # everything the moment it completes.
+      # 128K, up from 32768. The models declare context_length=262144 natively,
+      # so this is well inside what they support -- rope.freq_base=10000000 and
+      # dimension_count=64 are trained for long context, not extrapolated.
+      #
+      # KV cost is linear and was measured, not guessed. This arch is GQA with
+      # attention.head_count_kv=2 and head_dim=64, so with OLLAMA_KV_CACHE_TYPE
+      # q8_0 that is 10496 bytes/token/layer-set:
+      #     ctx=32768   KV = 0.32 GiB   (observed: "KV buffer size = 340.00 MiB")
+      #     ctx=131072  KV = 1.28 GiB
+      # The 340 MiB line is the real measurement from the load log and the formula
+      # reproduces it, which is why the 1.28 GiB figure above can be trusted.
+      #
+      # q8_0 is what makes this affordable: f16 KV would be 2.56 GiB and, with the
+      # 4771 MiB model buffer plus 567 MiB of compute buffers, would not fit in
+      # 8188 MiB at all. Do not remove OLLAMA_KV_CACHE_TYPE above.
+      - OLLAMA_CONTEXT_LENGTH=131072
       # Keep models resident so every request is served from VRAM with zero
       # cold-load. -1 = "always warm": the model stays loaded until the machine
-      # runs low on memory. Latency here is the priority, so we keep everything
-      # resident rather than freeing VRAM between requests.
+      # runs low on memory. Latency here is the priority.
       #
-      # NOTE: this means the LLM model occupies VRAM the whole time, so it cannot
-      # coexist with ComfyUI image generation on this 8GB GPU. That was the whole
-      # point of the previous OLLAMA_KEEP_ALIVE=0 (which freed VRAM for ComfyUI).
-      # The tradeoff was flipped by design: warm LLM > composable with ComfyUI.
+      # HISTORY, kept because it explains the tradeoff rather than contradicting
+      # it. This was 0 before ("release VRAM the moment a response finishes").
+      # 0 was correct for ComfyUI: the RTX 4060 Laptop has 8188 MiB TOTAL and
+      # two very different jobs want it — a ~6GB Q4 LLM and a bf16 diffusion
+      # model at 1024x1024. With no keep-alive, something in the request path
+      # asked for -1 anyway and llama-server sat on 7518 MiB indefinitely
+      # ("expires_at": 2319-01-17), leaving ComfyUI 87 MiB and failing every
+      # image with:
+      #   torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory
+      # even 0 was not enough for OpenWebUI's image flow, which generates the
+      # prompt with the LLM and then immediately calls ComfyUI, so any keep-alive
+      # long enough to smooth back-to-back requests still starves the diffusion
+      # model.
+      #
+      # DECISION (current): the tradeoff is flipped to warm LLM >
+      # composable-with-ComfyUI. -1 keeps every request off the cold-load path.
+      # The cost is explicit: the LLM holds ~6GB of VRAM continuously, so
+      # ComfyUI image generation cannot run while Ollama is warm. Flip this back
+      # to 0 if you need the images more than the latency.
       - OLLAMA_KEEP_ALIVE=-1
       # Allow the resident LLM and the tiny (~274MB) nomic-embed-text to both
       # stay loaded at once. Without this (default max loaded models = 1), an
@@ -72,6 +105,22 @@ services:
       # - OLLAMA_NUM_GPU=31
     volumes:
       - ./data/ollama:/root/.ollama
+    # This is the one service that can wedge while still reporting "Up": the
+    # CUDA context can die on a driver reset or the GPU can be stolen by ComfyUI,
+    # and the process stays alive serving 500s. Without a healthcheck, Docker
+    # never notices and `restart: unless-stopped` never fires, so opencode just
+    # silently fails on every request until someone looks.
+    #
+    # The image ships NO curl and NO wget (verified), so the probe uses the
+    # `ollama` CLI that is already on PATH. `ollama list` hits the same HTTP
+    # server the clients use and exits non-zero if it cannot reach it.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      # Generous: a cold model load can take ~20s and would otherwise trip this.
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
     networks:
       - ai-net
